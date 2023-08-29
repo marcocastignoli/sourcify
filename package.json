@@ -34,11 +34,11 @@
     "cov:check": "c8 report && c8 check-coverage --lines 100 --functions 100 --branches 100"
   },
   "workspaces": [
-    ".",
+    "./",
+    "ui",
     "packages/bytecode-utils",
     "packages/contract-call-decoder",
-    "packages/lib-sourcify",
-    "ui"
+    "packages/lib-sourcify"
   ],
   "keywords": [
     "ethereum",
