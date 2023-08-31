@@ -13,6 +13,8 @@ See [Conventional Commits](https://conventionalcommits.org) for commit guideline
 
 **Note:** Version bump only for package sourcify-server
 
+blabla
+
 ## [1.0.7](https://github.com/ethereum/sourcify/compare/sourcify-server@1.0.6...sourcify-server@1.0.7) (2023-08-31)
 
 **Note:** Version bump only for package sourcify-server
