@@ -1,4 +1,4 @@
-# 0.1.0 (2023-08-29)
+## [0.1.1](https://github.com/marcocastignoli/sourcify/compare/sourcify-ui@0.1.1...sourcify-ui@0.1.1) (2023-08-31)
 
 
 ### Bug Fixes
