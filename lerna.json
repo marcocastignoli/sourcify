@@ -7,9 +7,6 @@
     },
     "bootstrap": {
       "npmClientArgs": ["--no-package-lock"]
-    },
-    "version": {
-      "allowBranch": "staging"
     }
   },
   "packages": [".", "ui", "packages/*"],
