@@ -1,5 +1,5 @@
 import { Pool, PoolClient, QueryResult } from "pg";
-import { Bytes } from "../../types";
+import { Bytes, BytesKeccak } from "../../types";
 import {
   bytesFromString,
   GetSourcifyMatchByChainAddressResult,
@@ -13,10 +13,12 @@ import {
   StoredProperties,
   Tables,
   GetSourcifyMatchesAllChainsResult,
+  ExternalVerification,
 } from "./database-util";
 import { createHash } from "crypto";
 import { AuthTypes, Connector } from "@google-cloud/cloud-sql-connector";
 import logger from "../../../common/logger";
+import { EtherscanVerifyApiIdentifiers } from "../storageServices/EtherscanVerifyApiService";
 
 export interface DatabaseOptions {
   googleCloudSql?: {
@@ -33,6 +35,7 @@ export interface DatabaseOptions {
     password: string;
   };
   schema?: string;
+  maxConnections?: number;
 }
 
 export class Database {
@@ -47,7 +50,7 @@ export class Database {
   private postgresDatabase?: string;
   private postgresUser?: string;
   private postgresPassword?: string;
-
+  private maxConnections?: number;
   constructor(options: DatabaseOptions) {
     this.googleCloudSqlInstanceName = options.googleCloudSql?.instanceName;
     this.googleCloudSqlUser = options.googleCloudSql?.user;
@@ -61,6 +64,7 @@ export class Database {
     if (options.schema) {
       this.schema = options.schema;
     }
+    this.maxConnections = options.maxConnections;
   }
 
   get pool(): Pool {
@@ -90,8 +94,8 @@ export class Database {
         ...clientOpts,
         user: this.googleCloudSqlUser,
         database: this.googleCloudSqlDatabase,
-        max: 5,
         password: this.googleCloudSqlPassword,
+        max: this.maxConnections || 15,
       });
     } else if (this.postgresHost) {
       this._pool = new Pool({
@@ -100,7 +104,7 @@ export class Database {
         database: this.postgresDatabase,
         user: this.postgresUser,
         password: this.postgresPassword,
-        max: 5,
+        max: this.maxConnections || 15,
       });
     } else {
       throw new Error("Alliance Database is disabled");
@@ -181,6 +185,23 @@ ${
       (property) => STORED_PROPERTIES_TO_SELECTORS[property],
     );
 
+    const groupByClause =
+      properties.includes("sources") ||
+      properties.includes("std_json_input") ||
+      properties.includes("function_signatures") ||
+      properties.includes("event_signatures") ||
+      properties.includes("error_signatures")
+        ? `GROUP BY sourcify_matches.id,
+        verified_contracts.id,
+        compiled_contracts.id,
+        contract_deployments.id,
+        contracts.id,
+        onchain_runtime_code.code_hash,
+        onchain_creation_code.code_hash,
+        recompiled_runtime_code.code_hash,
+        recompiled_creation_code.code_hash`
+        : "";
+
     return await this.pool.query(
       `
         SELECT
@@ -198,20 +219,24 @@ ${
         LEFT JOIN ${this.schema}.code as recompiled_runtime_code ON recompiled_runtime_code.code_hash = compiled_contracts.runtime_code_hash
         LEFT JOIN ${this.schema}.code as recompiled_creation_code ON recompiled_creation_code.code_hash = compiled_contracts.creation_code_hash
 ${
-  properties.includes("sources") || properties.includes("std_json_input")
-    ? `JOIN ${this.schema}.compiled_contracts_sources ON compiled_contracts_sources.compilation_id = compiled_contracts.id
-      LEFT JOIN ${this.schema}.sources ON sources.source_hash = compiled_contracts_sources.source_hash
-      GROUP BY sourcify_matches.id, 
-        verified_contracts.id, 
-        compiled_contracts.id, 
-        contract_deployments.id,
-        contracts.id, 
-        onchain_runtime_code.code_hash, 
-        onchain_creation_code.code_hash,
-        recompiled_runtime_code.code_hash,
-        recompiled_creation_code.code_hash`
+  properties.includes("function_signatures") ||
+  properties.includes("event_signatures") ||
+  properties.includes("error_signatures")
+    ? `
+        JOIN ${this.schema}.compiled_contracts_signatures ON compiled_contracts_signatures.compilation_id = compiled_contracts.id
+        LEFT JOIN ${this.schema}.signatures ON signatures.signature_hash_32 = compiled_contracts_signatures.signature_hash_32
+      `
     : ""
 }
+${
+  properties.includes("sources") || properties.includes("std_json_input")
+    ? `
+        JOIN ${this.schema}.compiled_contracts_sources ON compiled_contracts_sources.compilation_id = compiled_contracts.id
+        LEFT JOIN ${this.schema}.sources ON sources.source_hash = compiled_contracts_sources.source_hash
+      `
+    : ""
+}
+        ${groupByClause}
         `,
       [chain, address],
     );
@@ -282,6 +307,16 @@ ${
           AND contract_deployments.address = $2
       `,
       [chain, address],
+    );
+  }
+
+  async getCompilationIdForVerifiedContract(
+    verifiedContractId: Tables.VerifiedContract["id"],
+    poolClient?: PoolClient,
+  ): Promise<QueryResult<Pick<Tables.VerifiedContract, "compilation_id">>> {
+    return await (poolClient || this.pool).query(
+      `SELECT compilation_id FROM verified_contracts WHERE id = $1`,
+      [verifiedContractId],
     );
   }
 
@@ -716,6 +751,68 @@ ${
     );
   }
 
+  async insertSignatures(
+    signatures: Omit<Tables.Signatures, "signature_hash_4">[],
+    poolClient?: PoolClient,
+  ): Promise<void> {
+    if (signatures.length === 0) {
+      return;
+    }
+
+    const valueIndexes: string[] = [];
+    const queryValues: (BytesKeccak | string)[] = [];
+
+    signatures.forEach((_, index) => {
+      const baseIndex = index * 2 + 1;
+      valueIndexes.push(`($${baseIndex}, $${baseIndex + 1})`);
+    });
+
+    signatures.forEach(({ signature_hash_32, signature }) => {
+      queryValues.push(signature_hash_32, signature);
+    });
+
+    await (poolClient || this.pool).query(
+      `INSERT INTO ${this.schema}.signatures (signature_hash_32, signature) 
+       VALUES ${valueIndexes.join(", ")} 
+       ON CONFLICT (signature_hash_32) DO NOTHING`,
+      queryValues,
+    );
+  }
+
+  async insertCompiledContractSignatures(
+    compilation_id: string,
+    signatures: Omit<
+      Tables.CompiledContractsSignatures,
+      "id" | "compilation_id"
+    >[],
+    poolClient?: PoolClient,
+  ): Promise<void> {
+    if (signatures.length === 0) {
+      return;
+    }
+
+    const valueIndexes: string[] = [];
+    const queryValues: (BytesKeccak | string)[] = [];
+
+    signatures.forEach((_, index) => {
+      const baseIndex = index * 3 + 1;
+      valueIndexes.push(
+        `($${baseIndex}, $${baseIndex + 1}, $${baseIndex + 2})`,
+      );
+    });
+
+    signatures.forEach(({ signature_hash_32, signature_type }) => {
+      queryValues.push(compilation_id, signature_hash_32, signature_type);
+    });
+
+    await (poolClient || this.pool).query(
+      `INSERT INTO ${this.schema}.compiled_contracts_signatures (compilation_id, signature_hash_32, signature_type) 
+       VALUES ${valueIndexes.join(", ")} 
+       ON CONFLICT (compilation_id, signature_hash_32, signature_type) DO NOTHING`,
+      queryValues,
+    );
+  }
+
   async insertVerifiedContract(
     poolClient: PoolClient,
     {
@@ -778,37 +875,6 @@ ${
       );
     }
     return verifiedContractsInsertResult;
-  }
-
-  async updateContractDeployment(
-    poolClient: PoolClient,
-    {
-      id,
-      transaction_hash,
-      block_number,
-      transaction_index,
-      deployer,
-      contract_id,
-    }: Omit<Tables.ContractDeployment, "chain_id" | "address">,
-  ) {
-    return await poolClient.query(
-      `UPDATE ${this.schema}.contract_deployments 
-       SET 
-         transaction_hash = $2,
-         block_number = $3,
-         transaction_index = $4,
-         deployer = $5,
-         contract_id = $6
-       WHERE id = $1`,
-      [
-        id,
-        transaction_hash,
-        block_number,
-        transaction_index,
-        deployer,
-        contract_id,
-      ],
-    );
   }
 
   async getVerificationJobById(
@@ -930,6 +996,47 @@ ${
         error_data,
       ],
     );
+  }
+
+  async upsertExternalVerification(
+    verificationJobId: Tables.VerificationJob["id"],
+    verifierIdentifier: EtherscanVerifyApiIdentifiers,
+    data: ExternalVerification,
+    poolClient?: PoolClient,
+  ): Promise<void> {
+    const payload: {
+      verificationId?: string;
+      error?: string;
+    } = {};
+
+    if (data.verificationId) {
+      payload.verificationId = data.verificationId;
+    }
+    if (data.error) {
+      payload.error = data.error;
+    }
+
+    if (Object.keys(payload).length === 0) {
+      return;
+    }
+
+    const result = await (poolClient || this.pool).query(
+      `UPDATE ${this.schema}.verification_jobs
+       SET external_verification = jsonb_set(
+         COALESCE(external_verification::jsonb, '{}'::jsonb),
+         ARRAY[$2::text],
+         $3::jsonb,
+         true
+       )
+       WHERE id = $1`,
+      [verificationJobId, verifierIdentifier, JSON.stringify(payload)],
+    );
+
+    if (result.rowCount === 0) {
+      throw new Error(
+        `Verification job ${verificationJobId} not found while updating external verification`,
+      );
+    }
   }
 
   async insertVerificationJobEphemeral({

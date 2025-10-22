@@ -10,6 +10,34 @@ SET client_min_messages = warning;
 SET row_security = off;
 
 --
+-- Name: pg_cron; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA pg_catalog;
+
+
+--
+-- Name: EXTENSION pg_cron; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON EXTENSION pg_cron IS 'Job scheduler for PostgreSQL';
+
+
+--
+-- Name: pg_trgm; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
+
+
+--
+-- Name: EXTENSION pg_trgm; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON EXTENSION pg_trgm IS 'text similarity measurement and index searching based on trigrams';
+
+
+--
 -- Name: pgcrypto; Type: EXTENSION; Schema: -; Owner: -
 --
 
@@ -21,6 +49,17 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 --
 
 COMMENT ON EXTENSION pgcrypto IS 'cryptographic functions';
+
+
+--
+-- Name: signature_type_enum; Type: TYPE; Schema: public; Owner: -
+--
+
+CREATE TYPE public.signature_type_enum AS ENUM (
+    'function',
+    'event',
+    'error'
+);
 
 
 --
@@ -900,6 +939,19 @@ CREATE TABLE public.compiled_contracts (
 
 
 --
+-- Name: compiled_contracts_signatures; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.compiled_contracts_signatures (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    compilation_id uuid NOT NULL,
+    signature_hash_32 bytea NOT NULL,
+    signature_type public.signature_type_enum NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: compiled_contracts_sources; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -964,6 +1016,44 @@ CREATE TABLE public.session (
     sess json NOT NULL,
     expire timestamp(6) without time zone NOT NULL
 );
+
+
+--
+-- Name: signatures; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.signatures (
+    signature_hash_32 bytea NOT NULL,
+    signature_hash_4 bytea GENERATED ALWAYS AS (SUBSTRING(signature_hash_32 FROM 1 FOR 4)) STORED,
+    signature character varying NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: signature_stats; Type: MATERIALIZED VIEW; Schema: public; Owner: -
+--
+
+CREATE MATERIALIZED VIEW public.signature_stats AS
+ SELECT (compiled_contracts_signatures.signature_type)::text AS signature_type,
+    count(DISTINCT compiled_contracts_signatures.signature_hash_32) AS count,
+    now() AS refreshed_at
+   FROM public.compiled_contracts_signatures
+  GROUP BY compiled_contracts_signatures.signature_type
+UNION ALL
+ SELECT 'unknown'::text AS signature_type,
+    count(*) AS count,
+    now() AS refreshed_at
+   FROM public.signatures s
+  WHERE (NOT (EXISTS ( SELECT 1
+           FROM public.compiled_contracts_signatures ccs
+          WHERE (ccs.signature_hash_32 = s.signature_hash_32))))
+UNION ALL
+ SELECT 'total'::text AS signature_type,
+    count(*) AS count,
+    now() AS refreshed_at
+   FROM public.signatures
+  WITH NO DATA;
 
 
 --
@@ -1204,6 +1294,22 @@ ALTER TABLE ONLY public.compiled_contracts
 
 
 --
+-- Name: compiled_contracts_signatures compiled_contracts_signatures_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.compiled_contracts_signatures
+    ADD CONSTRAINT compiled_contracts_signatures_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: compiled_contracts_signatures compiled_contracts_signatures_pseudo_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.compiled_contracts_signatures
+    ADD CONSTRAINT compiled_contracts_signatures_pseudo_pkey UNIQUE (compilation_id, signature_hash_32, signature_type);
+
+
+--
 -- Name: compiled_contracts_sources compiled_contracts_sources_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1265,6 +1371,14 @@ ALTER TABLE ONLY public.schema_migrations
 
 ALTER TABLE ONLY public.session
     ADD CONSTRAINT session_pkey PRIMARY KEY (sid);
+
+
+--
+-- Name: signatures signatures_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.signatures
+    ADD CONSTRAINT signatures_pkey PRIMARY KEY (signature_hash_32);
 
 
 --
@@ -1368,6 +1482,20 @@ CREATE INDEX compiled_contracts_runtime_code_hash ON public.compiled_contracts U
 
 
 --
+-- Name: compiled_contracts_signatures_signature_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX compiled_contracts_signatures_signature_idx ON public.compiled_contracts_signatures USING btree (signature_hash_32);
+
+
+--
+-- Name: compiled_contracts_signatures_type_signature_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX compiled_contracts_signatures_type_signature_idx ON public.compiled_contracts_signatures USING btree (signature_type, signature_hash_32);
+
+
+--
 -- Name: compiled_contracts_sources_compilation_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1414,6 +1542,27 @@ CREATE INDEX contracts_creation_code_hash_runtime_code_hash ON public.contracts 
 --
 
 CREATE INDEX contracts_runtime_code_hash ON public.contracts USING btree (runtime_code_hash);
+
+
+--
+-- Name: signature_stats_type_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX signature_stats_type_idx ON public.signature_stats USING btree (signature_type);
+
+
+--
+-- Name: signatures_hash_4_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX signatures_hash_4_idx ON public.signatures USING btree (signature_hash_4);
+
+
+--
+-- Name: signatures_signature_trgm_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX signatures_signature_trgm_idx ON public.signatures USING gin (signature public.gin_trgm_ops);
 
 
 --
@@ -1804,6 +1953,22 @@ ALTER TABLE ONLY public.compiled_contracts
 
 
 --
+-- Name: compiled_contracts_signatures compiled_contracts_signatures_compilation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.compiled_contracts_signatures
+    ADD CONSTRAINT compiled_contracts_signatures_compilation_id_fkey FOREIGN KEY (compilation_id) REFERENCES public.compiled_contracts(id);
+
+
+--
+-- Name: compiled_contracts_signatures compiled_contracts_signatures_signature_hash_32_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.compiled_contracts_signatures
+    ADD CONSTRAINT compiled_contracts_signatures_signature_hash_32_fkey FOREIGN KEY (signature_hash_32) REFERENCES public.signatures(signature_hash_32);
+
+
+--
 -- Name: compiled_contracts_sources compiled_contracts_sources_compilation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1895,4 +2060,7 @@ ALTER TABLE ONLY public.verified_contracts
 INSERT INTO public.schema_migrations (version) VALUES
     ('20250717103432'),
     ('20250722133557'),
-    ('20250723145429');
+    ('20250723145429'),
+    ('20250828092603'),
+    ('20250922140427'),
+    ('20250922141802');

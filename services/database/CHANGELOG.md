@@ -1,5 +1,14 @@
 # Changelog for `sourcify-database`
 
+## sourcify-database@2.9.0 - 2025-10-16
+
+- Add signature tables and queries for the new 4byte service. Create a materialized view for the `/stats` endpoint.
+- Change migrations scripts to accomodate multiple database instances during CI test runs: one for 4byte and one for sourcify-server. 
+
+## sourcify-database@2.8.0 - 2025-09-18
+
+- Add migrations for signature tables (#2344)
+
 ## sourcify-database@2.7.2 - 2025-08-25
 
 - Add issue references in replace script configuration files (#2304)

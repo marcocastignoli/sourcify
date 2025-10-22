@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## sourcify-server@3.5.0 - 2025-10-16
+
+- Remove the signature APIs from server, to be moved to the separate 4byte service
+- Turn off writing to repositoryV1 and repositoryV2
+- Make pg max connections configurable and set to 15 default (#2392)
+- Remove Etherscan instance from Cronos (25) due to deprecation (#2420)
+- Add timeout to binary search for fetching contract creation tx (#2403)
+- New chains:
+  - Lisk Mainnet (1135)
+  - Unichain (130)
+  - Taiko Aleshia (167000)
+  - Blast (81457)
+  - Celo Sepolia Testnet (11142220)
+  - Zilliqa EVM Testnet (33101)
+- Deprecated chains:
+  - Celo Alfajores Testnet (44787)
+  - Celo Baklava Testnet (62320)
+
+## sourcify-server@3.4.0 - 2025-09-18
+
+- 4byte read endpoints (#2373)
+- Add fields and selectors for querying signatures via contract lookup API (#2377)
+- Add logic for writing signatures to db inside SourcifyDatabaseService (#2357)
+- Update Docker image references to argotorg in README and docker-compose files (#2332)
+- Add Privix Chain mainnet (16969696) & testnet (96969696) to Sourcify (#2338)
+- Disable polygon zkevm (#2360)
+- Disable chains that fail chain-tests in CI (#2375)
+- Replace Blast API with Alchemy, add Celo Sepolia (#2372)
+
 ## sourcify-server@3.3.3 - 2025-08-25
 
 - Move Etherscan utils to lib-sourcify (#2297)
